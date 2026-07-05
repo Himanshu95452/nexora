@@ -1,0 +1,324 @@
+// Nexora — Prisma schema
+// Run `npx prisma migrate dev` against a real PostgreSQL instance to apply.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Auth (NextAuth / Auth.js) — standard adapter models + our own Role/User
+// ---------------------------------------------------------------------------
+
+enum Role {
+  CUSTOMER
+  PROFESSIONAL
+  ADMIN
+}
+
+model User {
+  id            String    @id @default(cuid())
+  name          String?
+  email         String?   @unique
+  phone         String?   @unique
+  passwordHash  String? // set for credentials login; null if OAuth-only
+  emailVerified DateTime?
+  image         String?
+  role          Role      @default(CUSTOMER)
+
+  accounts Account[]
+  sessions Session[]
+
+  customer     Customer?
+  professional Professional?
+  admin        Admin?
+
+  notifications Notification[]
+  complaintsRaised Complaint[] @relation("ComplaintRaisedBy")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+// ---------------------------------------------------------------------------
+// Role profiles
+// ---------------------------------------------------------------------------
+
+model Customer {
+  id             String   @id @default(cuid())
+  userId         String   @unique
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  walletBalance  Int      @default(0) // paise, avoids float rounding issues
+  referralCode   String   @unique
+  rewardsPoints  Int      @default(0)
+
+  addresses      Address[]
+  bookings       Booking[]
+  reviews        Review[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Address {
+  id         String   @id @default(cuid())
+  customerId String
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  label      String // "Home", "Office", etc.
+  line       String
+  cityId     String
+  city       City     @relation(fields: [cityId], references: [id])
+  createdAt  DateTime @default(now())
+}
+
+enum KycStatus {
+  PENDING
+  IN_REVIEW
+  APPROVED
+  REJECTED
+}
+
+enum BadgeTier {
+  BRONZE
+  SILVER
+  GOLD
+  PLATINUM
+}
+
+model Professional {
+  id             String    @id @default(cuid())
+  userId         String    @unique
+  user           User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  categoryId     String?
+  category       Category? @relation(fields: [categoryId], references: [id])
+  cityId         String?
+  city           City?     @relation(fields: [cityId], references: [id])
+
+  bio            String?
+  kycStatus      KycStatus @default(PENDING)
+  trustScore     Int       @default(0)
+  badge          BadgeTier @default(BRONZE)
+  online         Boolean   @default(false)
+  ratingAvg      Float     @default(0)
+  jobsCompleted  Int       @default(0)
+  walletBalance  Int       @default(0) // paise — credited on payment settlement
+
+  bookings       Booking[]
+  reviews        Review[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Admin {
+  id          String   @id @default(cuid())
+  userId      String   @unique
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  permissions Json     @default("[]") // e.g. ["verify_professionals","manage_refunds"]
+  createdAt   DateTime @default(now())
+}
+
+// ---------------------------------------------------------------------------
+// Catalog
+// ---------------------------------------------------------------------------
+
+model City {
+  id       String    @id @default(cuid())
+  name     String    @unique
+  isLive   Boolean   @default(false)
+
+  addresses     Address[]
+  professionals Professional[]
+  bookings      Booking[]
+}
+
+model Category {
+  id            String    @id @default(cuid())
+  name          String    @unique
+  icon          String? // lucide-react icon name, matches frontend
+  startingPrice Int // paise
+  commissionRate Int      @default(15) // percent, platform's cut on settlement
+
+  services      Service[]
+  professionals Professional[]
+}
+
+model Service {
+  id          String   @id @default(cuid())
+  categoryId  String
+  category    Category @relation(fields: [categoryId], references: [id])
+  name        String
+  description String?
+  basePrice   Int // paise
+
+  bookings Booking[]
+
+  createdAt DateTime @default(now())
+}
+
+// ---------------------------------------------------------------------------
+// Transactions
+// ---------------------------------------------------------------------------
+
+enum BookingStatus {
+  PENDING
+  CONFIRMED
+  ON_THE_WAY
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+}
+
+model Booking {
+  id             String        @id @default(cuid())
+  customerId     String
+  customer       Customer      @relation(fields: [customerId], references: [id])
+  professionalId String?
+  professional   Professional? @relation(fields: [professionalId], references: [id])
+  serviceId      String
+  service        Service       @relation(fields: [serviceId], references: [id])
+  cityId         String
+  city           City          @relation(fields: [cityId], references: [id])
+
+  status       BookingStatus @default(PENDING)
+  scheduledAt  DateTime
+  address      String
+  estimatedPrice Int // paise
+  finalPrice     Int?
+
+  payment  Payment?
+  review   Review?
+  complaints Complaint[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+enum PaymentMethod {
+  UPI
+  CARD
+  NETBANKING
+  WALLET
+  CASH
+}
+
+enum PaymentStatus {
+  PENDING
+  SUCCESS
+  FAILED
+  REFUNDED
+  PARTIALLY_REFUNDED
+  SETTLED
+}
+
+model Payment {
+  id            String        @id @default(cuid())
+  bookingId     String        @unique
+  booking       Booking       @relation(fields: [bookingId], references: [id])
+  method        PaymentMethod
+  amount        Int // paise
+  status        PaymentStatus @default(PENDING)
+  transactionRef String? // placeholder gateway reference
+  refundedAmount Int?
+  razorpayOrderId   String? @unique
+  razorpayPaymentId String?
+
+  // Populated once the platform settles the professional's payout for this
+  // job — after Job Completed + Customer Rating, per the booking engine flow.
+  platformCommission  Int?
+  professionalPayout  Int?
+  settledAt           DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Review {
+  id             String       @id @default(cuid())
+  bookingId      String       @unique
+  booking        Booking      @relation(fields: [bookingId], references: [id])
+  customerId     String
+  customer       Customer     @relation(fields: [customerId], references: [id])
+  professionalId String
+  professional   Professional @relation(fields: [professionalId], references: [id])
+
+  rating  Int // 1-5
+  comment String?
+
+  createdAt DateTime @default(now())
+}
+
+enum ComplaintStatus {
+  OPEN
+  UNDER_INVESTIGATION
+  REFUND_APPROVED
+  RESOLVED
+  REJECTED
+}
+
+model Complaint {
+  id          String          @id @default(cuid())
+  bookingId   String
+  booking     Booking         @relation(fields: [bookingId], references: [id])
+  raisedById  String
+  raisedBy    User            @relation("ComplaintRaisedBy", fields: [raisedById], references: [id])
+
+  subject         String
+  description     String
+  status          ComplaintStatus @default(OPEN)
+  resolutionNotes String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Notification {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  title     String
+  body      String
+  read      Boolean  @default(false)
+  createdAt DateTime @default(now())
+}
